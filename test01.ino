@@ -27,6 +27,13 @@
   #define MODULE_DTR_PIN    44
 #endif
 
+// ---------- GROVE pin fallbacks (defined in nectis_nrf52840/variant.h) ----------
+// GROVEのVCCはBG96電源レール（MODULE_PWR_PIN）から生成されるため、
+// GROVE使用前に MODULE_PWR_PIN → GROVE_VCCB_PIN の順でHIGHにする必要がある
+#ifndef GROVE_VCCB_PIN
+  #define GROVE_VCCB_PIN    25
+#endif
+
 #define BG96_UART         Serial1
 #define BG96_BAUD         115200
 #define BG96_STATUS_READY HIGH   // STATUS pin goes HIGH when BG96 is on
@@ -577,6 +584,7 @@ void printBanner() {
   Serial.println("  g : BG96 HTTP GET test (SORACOM metadata)");
   Serial.println("  p : BG96 PSM test (sleep/wake, ~90s)");
   Serial.println("  e : BG96 eDRX test (~30s)");
+  Serial.println("  m : EEPROM read/write test (24LC256, 0x50)");
   Serial.println();
 }
 
@@ -619,6 +627,14 @@ void testAnalog() {
 
 void testI2CScan() {
   Serial.println("[I2C] scan start");
+
+  // GROVEのVCCはBG96電源レール経由のため、先に電源投入が必要
+  pinMode(MODULE_PWR_PIN,  OUTPUT); digitalWrite(MODULE_PWR_PIN,  HIGH);
+  delay(100);
+  pinMode(GROVE_VCCB_PIN,  OUTPUT); digitalWrite(GROVE_VCCB_PIN,  HIGH);
+  delay(200);  // ICの起動を待つ
+  Wire.begin();
+
   uint8_t found = 0;
 
   for (uint8_t addr = 1; addr < 127; ++addr) {
@@ -637,6 +653,73 @@ void testI2CScan() {
 
   Serial.print("[I2C] scan done, devices=");
   Serial.println(found);
+}
+
+// 24LC256 EEPROM 読み書きテスト（アドレス0x50固定）
+// GROVEの電源はtestI2CScan()と同様に先に投入する
+void testEEPROM() {
+  Serial.println("[EEPROM] test start (24LC256, addr=0x50)");
+
+  // GROVE電源ON
+  pinMode(MODULE_PWR_PIN, OUTPUT); digitalWrite(MODULE_PWR_PIN, HIGH);
+  delay(100);
+  pinMode(GROVE_VCCB_PIN, OUTPUT); digitalWrite(GROVE_VCCB_PIN, HIGH);
+  delay(200);
+  Wire.begin();
+
+  const uint8_t  devAddr  = 0x50;
+  const uint16_t memAddr  = 0x0010;  // テスト書き込み先アドレス（先頭を避ける）
+  const uint8_t  testData[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0x12, 0x34, 0x56, 0x78 };
+  const uint8_t  len = sizeof(testData);
+
+  // --- Write ---
+  Serial.print("[EEPROM] write @ 0x");
+  Serial.print(memAddr, HEX);
+  Serial.print(": ");
+  for (uint8_t i = 0; i < len; i++) {
+    Serial.print(testData[i], HEX); Serial.print(" ");
+  }
+  Serial.println();
+
+  Wire.beginTransmission(devAddr);
+  Wire.write((uint8_t)(memAddr >> 8));   // アドレス上位バイト
+  Wire.write((uint8_t)(memAddr & 0xFF)); // アドレス下位バイト
+  for (uint8_t i = 0; i < len; i++) Wire.write(testData[i]);
+  uint8_t werr = Wire.endTransmission();
+  if (werr != 0) {
+    Serial.print("[EEPROM] write FAIL (I2C error="); Serial.print(werr); Serial.println(")");
+    return;
+  }
+  delay(10);  // 24LC256 書き込みサイクル最大5ms、余裕を持って10ms
+
+  // --- Read ---
+  Wire.beginTransmission(devAddr);
+  Wire.write((uint8_t)(memAddr >> 8));
+  Wire.write((uint8_t)(memAddr & 0xFF));
+  uint8_t rerr = Wire.endTransmission(false);  // repeated start
+  if (rerr != 0) {
+    Serial.print("[EEPROM] read seek FAIL (I2C error="); Serial.print(rerr); Serial.println(")");
+    return;
+  }
+  Wire.requestFrom((uint8_t)devAddr, len);
+
+  uint8_t readBuf[8];
+  uint8_t got = 0;
+  while (Wire.available() && got < len) readBuf[got++] = Wire.read();
+
+  Serial.print("[EEPROM] read  @ 0x");
+  Serial.print(memAddr, HEX);
+  Serial.print(": ");
+  for (uint8_t i = 0; i < got; i++) {
+    Serial.print(readBuf[i], HEX); Serial.print(" ");
+  }
+  Serial.println();
+
+  // --- Verify ---
+  bool pass = (got == len);
+  for (uint8_t i = 0; i < got && pass; i++) pass = (readBuf[i] == testData[i]);
+  Serial.print("[EEPROM] result: ");
+  Serial.println(pass ? "PASS" : "FAIL");
 }
 
 void runAllQuickTests() {
@@ -702,6 +785,9 @@ void loop() {
         break;
       case 'e':
         testBG96Edrx();
+        break;
+      case 'm':
+        testEEPROM();
         break;
       case '\n':
       case '\r':
