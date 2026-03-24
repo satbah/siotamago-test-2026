@@ -33,6 +33,19 @@
 #ifndef GROVE_VCCB_PIN
   #define GROVE_VCCB_PIN    25
 #endif
+#ifndef GROVE_UART_RX
+  #define GROVE_UART_RX     13
+#endif
+#ifndef GROVE_UART_TX
+  #define GROVE_UART_TX     14
+#endif
+
+// GROVE UARTはSerial2（UARTE1）を使用
+// Serial1（UARTE0）はBG96専用（PIN_SERIAL1_RX/TX = pin 7/6）
+// Serial2はUart.cppで定義されるがUart.hからexternが見えないため明示宣言が必要
+extern Uart Serial2;
+#define GROVE_UART        Serial2
+#define GROVE_UART_BAUD   115200
 
 #define BG96_UART         Serial1
 #define BG96_BAUD         115200
@@ -570,6 +583,58 @@ void testBG96Edrx() {
   Serial.println("=== BG96 eDRX Test Done ===");
 }
 
+// =============================================================================
+// GROVE UART ループバックテスト
+// TXとRXをショートしたケーブルを接続して使用
+// =============================================================================
+
+void testGroveUartLoopback() {
+  Serial.println();
+  Serial.println("=== GROVE UART Loopback Test ===");
+
+  // GROVE電源ON（UARTはGROVEコネクタ経由）
+  pinMode(MODULE_PWR_PIN, OUTPUT); digitalWrite(MODULE_PWR_PIN, HIGH);
+  delay(100);
+  pinMode(GROVE_VCCB_PIN, OUTPUT); digitalWrite(GROVE_VCCB_PIN, HIGH);
+  delay(100);
+
+  GROVE_UART.begin(GROVE_UART_BAUD);
+  delay(100);
+  while (GROVE_UART.available()) GROVE_UART.read();  // バッファクリア
+
+  const char* testStr = "Hello sIoTamago UART Loopback!";
+  const uint8_t testLen = strlen(testStr);
+  uint8_t passCount = 0;
+
+  // 3回送受信してテスト
+  for (uint8_t trial = 0; trial < 3; trial++) {
+    while (GROVE_UART.available()) GROVE_UART.read();  // 念のためクリア
+
+    GROVE_UART.print(testStr);
+    Serial.print("[UART] >> "); Serial.println(testStr);
+
+    // 受信待ち（最大500ms）
+    String received = "";
+    unsigned long t = millis();
+    while (millis() - t < 500) {
+      while (GROVE_UART.available()) received += (char)GROVE_UART.read();
+      if (received.length() >= testLen) break;
+    }
+
+    bool match = (received == String(testStr));
+    Serial.print("[UART] << "); Serial.println(received.length() > 0 ? received : "(no data)");
+    Serial.print("[UART] trial "); Serial.print(trial + 1); Serial.print("/3: ");
+    Serial.println(match ? "PASS" : "FAIL");
+    if (match) passCount++;
+
+    delay(100);
+  }
+
+  Serial.print("[UART] result: ");
+  Serial.println(passCount == 3 ? "PASS" : "FAIL");
+  Serial.println("=== GROVE UART Loopback Test Done ===");
+}
+
 void printBanner() {
   Serial.println();
   Serial.println("=== sIoTamago nRF52 Hardware Test ===");
@@ -585,6 +650,7 @@ void printBanner() {
   Serial.println("  p : BG96 PSM test (sleep/wake, ~90s)");
   Serial.println("  e : BG96 eDRX test (~30s)");
   Serial.println("  m : EEPROM read/write test (24LC256, 0x50)");
+  Serial.println("  u : GROVE UART loopback test (TX-RX shorted)");
   Serial.println();
 }
 
@@ -820,6 +886,9 @@ void loop() {
         break;
       case 'm':
         testEEPROM();
+        break;
+      case 'u':
+        testGroveUartLoopback();
         break;
       case '\n':
       case '\r':
