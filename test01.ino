@@ -655,10 +655,10 @@ void testI2CScan() {
   Serial.println(found);
 }
 
-// 24LC256 EEPROM 読み書きテスト（アドレス0x50固定）
+// 24LC256 EEPROM 読み書きテスト（アドレス0x50固定、4KB、400kHz）
 // GROVEの電源はtestI2CScan()と同様に先に投入する
 void testEEPROM() {
-  Serial.println("[EEPROM] test start (24LC256, addr=0x50)");
+  Serial.println("[EEPROM] test start (24LC256, addr=0x50, 4096 bytes, 400kHz)");
 
   // GROVE電源ON
   pinMode(MODULE_PWR_PIN, OUTPUT); digitalWrite(MODULE_PWR_PIN, HIGH);
@@ -666,60 +666,92 @@ void testEEPROM() {
   pinMode(GROVE_VCCB_PIN, OUTPUT); digitalWrite(GROVE_VCCB_PIN, HIGH);
   delay(200);
   Wire.begin();
+  Wire.setClock(400000);  // 400kHz Fast Mode
 
-  const uint8_t  devAddr  = 0x50;
-  const uint16_t memAddr  = 0x0010;  // テスト書き込み先アドレス（先頭を避ける）
-  const uint8_t  testData[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0x12, 0x34, 0x56, 0x78 };
-  const uint8_t  len = sizeof(testData);
+  const uint8_t  devAddr   = 0x50;
+  const uint16_t startAddr = 0x0000;
+  const uint16_t dataLen   = 4096;
+  const uint8_t  pageSize  = 64;   // 24LC256のページバッファサイズ
+  const uint8_t  readChunk = 32;
 
-  // --- Write ---
-  Serial.print("[EEPROM] write @ 0x");
-  Serial.print(memAddr, HEX);
-  Serial.print(": ");
-  for (uint8_t i = 0; i < len; i++) {
-    Serial.print(testData[i], HEX); Serial.print(" ");
+  // --- Step1: 現在のデータを読み出す ---
+  Serial.println("[EEPROM] step1: read current data...");
+  Wire.beginTransmission(devAddr);
+  Wire.write((uint8_t)(startAddr >> 8));
+  Wire.write((uint8_t)(startAddr & 0xFF));
+  if (Wire.endTransmission(false) != 0) {
+    Serial.println("[EEPROM] read seek FAIL"); return;
   }
+
+  // 読み出したデータをRAMに保存（4KB、nRF52840は余裕）
+  static uint8_t buf[4096];
+  for (uint16_t offset = 0; offset < dataLen; offset += readChunk) {
+    Wire.requestFrom((uint8_t)devAddr, readChunk);
+    for (uint8_t i = 0; i < readChunk; i++) {
+      if (!Wire.available()) {
+        Serial.print("[EEPROM] read underrun at offset="); Serial.println(offset + i); return;
+      }
+      buf[offset + i] = Wire.read();
+    }
+  }
+  Serial.print("[EEPROM] current[0..3]: ");
+  for (uint8_t i = 0; i < 4; i++) { Serial.print(buf[i], HEX); Serial.print(" "); }
   Serial.println();
 
+  // --- Step2: ビット反転して書き込む ---
+  Serial.println("[EEPROM] step2: write inverted data...");
+  unsigned long writeStart = millis();
+  for (uint16_t offset = 0; offset < dataLen; offset += pageSize) {
+    uint16_t addr = startAddr + offset;
+    Wire.beginTransmission(devAddr);
+    Wire.write((uint8_t)(addr >> 8));
+    Wire.write((uint8_t)(addr & 0xFF));
+    for (uint8_t i = 0; i < pageSize; i++) Wire.write((uint8_t)(~buf[offset + i]));
+    uint8_t err = Wire.endTransmission();
+    if (err != 0) {
+      Serial.print("[EEPROM] write FAIL at offset="); Serial.print(offset);
+      Serial.print(" (I2C error="); Serial.print(err); Serial.println(")"); return;
+    }
+    delay(10);  // ページ書き込みサイクル最大5ms、余裕を持って10ms
+  }
+  unsigned long writeMs = millis() - writeStart;
+  Serial.print("[EEPROM] write done in "); Serial.print(writeMs); Serial.println(" ms");
+
+  // --- Step3: 読み出して検証（反転値と一致するか）---
   Wire.beginTransmission(devAddr);
-  Wire.write((uint8_t)(memAddr >> 8));   // アドレス上位バイト
-  Wire.write((uint8_t)(memAddr & 0xFF)); // アドレス下位バイト
-  for (uint8_t i = 0; i < len; i++) Wire.write(testData[i]);
-  uint8_t werr = Wire.endTransmission();
-  if (werr != 0) {
-    Serial.print("[EEPROM] write FAIL (I2C error="); Serial.print(werr); Serial.println(")");
-    return;
+  Wire.write((uint8_t)(startAddr >> 8));
+  Wire.write((uint8_t)(startAddr & 0xFF));
+  if (Wire.endTransmission(false) != 0) {
+    Serial.println("[EEPROM] read seek FAIL"); return;
   }
-  delay(10);  // 24LC256 書き込みサイクル最大5ms、余裕を持って10ms
 
-  // --- Read ---
-  Wire.beginTransmission(devAddr);
-  Wire.write((uint8_t)(memAddr >> 8));
-  Wire.write((uint8_t)(memAddr & 0xFF));
-  uint8_t rerr = Wire.endTransmission(false);  // repeated start
-  if (rerr != 0) {
-    Serial.print("[EEPROM] read seek FAIL (I2C error="); Serial.print(rerr); Serial.println(")");
-    return;
+  Serial.println("[EEPROM] step3: read back & verify...");
+  unsigned long readStart = millis();
+  bool pass = true;
+  uint16_t verified = 0;
+  for (uint16_t offset = 0; offset < dataLen && pass; offset += readChunk) {
+    Wire.requestFrom((uint8_t)devAddr, readChunk);
+    for (uint8_t i = 0; i < readChunk; i++) {
+      if (!Wire.available()) {
+        Serial.print("[EEPROM] read underrun at offset="); Serial.println(offset + i);
+        pass = false; break;
+      }
+      uint8_t got      = Wire.read();
+      uint8_t expected = (uint8_t)(~buf[offset + i]);
+      if (got != expected) {
+        Serial.print("[EEPROM] mismatch at offset="); Serial.print(offset + i);
+        Serial.print(" expected=0x"); Serial.print(expected, HEX);
+        Serial.print(" got=0x"); Serial.println(got, HEX);
+        pass = false; break;
+      }
+      verified++;
+    }
   }
-  Wire.requestFrom((uint8_t)devAddr, len);
+  unsigned long readMs = millis() - readStart;
 
-  uint8_t readBuf[8];
-  uint8_t got = 0;
-  while (Wire.available() && got < len) readBuf[got++] = Wire.read();
-
-  Serial.print("[EEPROM] read  @ 0x");
-  Serial.print(memAddr, HEX);
-  Serial.print(": ");
-  for (uint8_t i = 0; i < got; i++) {
-    Serial.print(readBuf[i], HEX); Serial.print(" ");
-  }
-  Serial.println();
-
-  // --- Verify ---
-  bool pass = (got == len);
-  for (uint8_t i = 0; i < got && pass; i++) pass = (readBuf[i] == testData[i]);
-  Serial.print("[EEPROM] result: ");
-  Serial.println(pass ? "PASS" : "FAIL");
+  Serial.print("[EEPROM] read done in "); Serial.print(readMs); Serial.println(" ms");
+  Serial.print("[EEPROM] verified "); Serial.print(verified); Serial.println(" bytes");
+  Serial.print("[EEPROM] result: "); Serial.println(pass ? "PASS" : "FAIL");
 }
 
 void runAllQuickTests() {
