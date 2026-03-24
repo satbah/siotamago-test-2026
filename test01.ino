@@ -644,7 +644,7 @@ void printBanner() {
   Serial.println("  i : I2C scan");
   Serial.println("  a : analog read (if available)");
   Serial.println("  b : button read (if available)");
-  Serial.println("  r : run all quick tests");
+  Serial.println("  r : run all tests (LED/I2C/EEPROM/UART/BG96)");
   Serial.println("  q : BG96 test (AT / network / internet)");
   Serial.println("  g : BG96 HTTP GET test (SORACOM metadata)");
   Serial.println("  p : BG96 PSM test (sleep/wake, ~90s)");
@@ -820,11 +820,14 @@ void testEEPROM() {
   Serial.print("[EEPROM] result: "); Serial.println(pass ? "PASS" : "FAIL");
 }
 
-void runAllQuickTests() {
+void runAllTests() {
   testLed();
   testButton();
   testAnalog();
   testI2CScan();
+  testEEPROM();
+  testGroveUartLoopback();
+  testBG96All();
 }
 
 void setup() {
@@ -846,7 +849,7 @@ void setup() {
   Serial.print("LED pin: ");
   Serial.println(TEST_LED_PIN);
 
-  runAllQuickTests();
+  runAllTests();
 }
 
 void loop() {
@@ -870,7 +873,7 @@ void loop() {
         testButton();
         break;
       case 'r':
-        runAllQuickTests();
+        runAllTests();
         break;
       case 'q':
         testBG96All();
